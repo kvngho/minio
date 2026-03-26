@@ -37,6 +37,7 @@ import (
 
 	"github.com/klauspost/readahead"
 	"github.com/minio/madmin-go/v3"
+	"github.com/pierrec/lz4/v4"
 	"github.com/minio/minio-go/v7/pkg/tags"
 	"github.com/minio/minio/internal/bucket/lifecycle"
 	"github.com/minio/minio/internal/bucket/object/lock"
@@ -2410,13 +2411,32 @@ func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object st
 		pw.CloseWithError(err)
 	}()
 
+	// LZ4 compress the object data before uploading to remote tier.
+	// This reduces WAN bandwidth usage for tiering transfers.
+	originalSize := fi.Size
+	compPR, compPW := xioutil.WaitPipe()
+	go func() {
+		lzw := lz4.NewWriter(compPW)
+		_, cerr := io.Copy(lzw, pr)
+		if cerr != nil {
+			pr.CloseWithError(cerr)
+			lzw.Close()
+			compPW.CloseWithError(cerr)
+			return
+		}
+		pr.CloseWithError(nil)
+		compPW.CloseWithError(lzw.Close())
+	}()
+
+	tierMeta := map[string]string{
+		"name": object,
+		"x-minio-tier-compression":   "lz4",
+		"x-minio-tier-original-size": strconv.FormatInt(originalSize, 10),
+	}
+
 	var rv remoteVersionID
-	rv, err = tgtClient.PutWithMeta(ctx, destObj, pr, fi.Size, map[string]string{
-		"name": object, // preserve the original name of the object on the remote tier object metadata.
-		// this is just for future reverse lookup() purposes (applies only for new objects)
-		// does not apply retro-actively on already transitioned objects.
-	})
-	pr.CloseWithError(err)
+	rv, err = tgtClient.PutWithMeta(ctx, destObj, compPR, -1, tierMeta)
+	compPR.CloseWithError(err)
 	if err != nil {
 		traceFn(ILMTransition, nil, err)
 		return err
@@ -2425,6 +2445,11 @@ func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object st
 	fi.TransitionedObjName = destObj
 	fi.TransitionTier = opts.Transition.Tier
 	fi.TransitionVersionID = string(rv)
+	if fi.Metadata == nil {
+		fi.Metadata = make(map[string]string)
+	}
+	fi.Metadata[ReservedMetadataPrefixLower+"tier-compression"] = "lz4"
+	fi.Metadata[ReservedMetadataPrefixLower+"tier-original-size"] = strconv.FormatInt(originalSize, 10)
 	eventName := event.ObjectTransitionComplete
 
 	storageDisks := er.getDisks()
