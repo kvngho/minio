@@ -2429,9 +2429,9 @@ func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object st
 	}()
 
 	tierMeta := map[string]string{
-		"name": object,
-		"x-minio-tier-compression":   "lz4",
-		"x-minio-tier-original-size": strconv.FormatInt(originalSize, 10),
+		"name":              object,
+		"tier-compression":  "lz4",
+		"tier-originalsize": strconv.FormatInt(originalSize, 10),
 	}
 
 	var rv remoteVersionID
