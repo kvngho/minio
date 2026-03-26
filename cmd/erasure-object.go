@@ -2413,14 +2413,17 @@ func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object st
 
 	// LZ4 compress the object data before uploading to remote tier.
 	// This reduces WAN bandwidth usage for tiering transfers.
+	// Uses HC mode (Level9) for better compression ratio at the cost of
+	// slightly higher CPU, which is acceptable since WAN bandwidth is the bottleneck.
 	originalSize := fi.Size
 	compPR, compPW := xioutil.WaitPipe()
 	go func() {
 		lzw := lz4.NewWriter(compPW)
+		lzw.Apply(lz4.CompressionLevelOption(lz4.Level9))
 		_, cerr := io.Copy(lzw, pr)
 		if cerr != nil {
-			pr.CloseWithError(cerr)
 			lzw.Close()
+			pr.CloseWithError(cerr)
 			compPW.CloseWithError(cerr)
 			return
 		}
@@ -2429,9 +2432,9 @@ func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object st
 	}()
 
 	tierMeta := map[string]string{
-		"name":              object,
-		"tier-compression":  "lz4",
-		"tier-originalsize": strconv.FormatInt(originalSize, 10),
+		"name":               object,
+		"tier-compression":   "lz4",
+		"tier-original-size": strconv.FormatInt(originalSize, 10),
 	}
 
 	var rv remoteVersionID

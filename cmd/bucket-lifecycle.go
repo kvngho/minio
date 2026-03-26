@@ -18,7 +18,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -758,34 +757,23 @@ func getTransitionedObjectReader(ctx context.Context, bucket, object string, rs 
 		return nil, fmt.Errorf("transition storage class not configured: %w", err)
 	}
 
+	isCompressed := oi.UserDefined[ReservedMetadataPrefixLower+"tier-compression"] == "lz4"
+
 	fn, off, length, err := NewGetObjectReader(rs, oi, opts, h)
 	if err != nil {
 		return nil, ErrorRespToObjectError(err, bucket, object)
 	}
-
-	// Always read the full object from the tier first.
-	// We need to detect if it's LZ4-compressed by checking the magic bytes.
-	timeTierAction := auditTierActions(ctx, oi.TransitionedObject.Tier, length)
-	reader, err := tgtClient.Get(ctx, oi.TransitionedObject.Name, remoteVersionID(oi.TransitionedObject.VersionID), WarmBackendGetOpts{})
-	if err != nil {
-		return nil, err
-	}
-
-	// Detect LZ4 compression by peeking at the first 4 bytes (LZ4 frame magic: 0x04224D18).
-	header := make([]byte, 4)
-	n, err := io.ReadFull(reader, header)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		reader.Close()
-		return nil, err
-	}
-
-	// Reconstruct full reader with the peeked bytes prepended.
-	fullReader := io.MultiReader(io.NopCloser(bytes.NewReader(header[:n])), reader)
-
-	isCompressed := n == 4 && header[0] == 0x04 && header[1] == 0x22 && header[2] == 0x4d && header[3] == 0x18
+	gopts := WarmBackendGetOpts{}
 
 	if isCompressed {
-		lzr := lz4.NewReader(fullReader)
+		// For compressed objects, read full object from tier and decompress.
+		// Byte-range reads on compressed data are meaningless.
+		timeTierAction := auditTierActions(ctx, oi.TransitionedObject.Tier, length)
+		reader, err := tgtClient.Get(ctx, oi.TransitionedObject.Name, remoteVersionID(oi.TransitionedObject.VersionID), gopts)
+		if err != nil {
+			return nil, err
+		}
+		lzr := lz4.NewReader(reader)
 		closer := func() {
 			timeTierAction(reader.Close())
 		}
@@ -802,21 +790,21 @@ func getTransitionedObjectReader(ctx context.Context, bucket, object string, rs 
 		return fn(io.NopCloser(decompReader), h, closer)
 	}
 
-	// Not compressed — apply range if needed by skipping/limiting.
-	var plainReader io.Reader = fullReader
-	if off > 0 {
-		if _, err := io.CopyN(io.Discard, fullReader, off); err != nil {
-			reader.Close()
-			return nil, err
-		}
+	// Not compressed — use server-side range read as before.
+	if off >= 0 && length >= 0 {
+		gopts.startOffset = off
+		gopts.length = length
 	}
-	if length >= 0 {
-		plainReader = io.LimitReader(fullReader, length)
+
+	timeTierAction := auditTierActions(ctx, oi.TransitionedObject.Tier, length)
+	reader, err := tgtClient.Get(ctx, oi.TransitionedObject.Name, remoteVersionID(oi.TransitionedObject.VersionID), gopts)
+	if err != nil {
+		return nil, err
 	}
 	closer := func() {
 		timeTierAction(reader.Close())
 	}
-	return fn(io.NopCloser(plainReader), h, closer)
+	return fn(reader, h, closer)
 }
 
 // RestoreRequestType represents type of restore.
