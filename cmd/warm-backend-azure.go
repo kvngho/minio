@@ -65,7 +65,11 @@ func (az *warmBackendAzure) PutWithMeta(ctx context.Context, object string, r io
 	for k, v := range meta {
 		azMeta[k] = to.Ptr(v)
 	}
-	resp, err := az.clnt.UploadStream(ctx, az.Bucket, az.getDest(object), io.LimitReader(r, length), &azblob.UploadStreamOptions{
+	var uploadReader io.Reader = r
+	if length >= 0 {
+		uploadReader = io.LimitReader(r, length)
+	}
+	resp, err := az.clnt.UploadStream(ctx, az.Bucket, az.getDest(object), uploadReader, &azblob.UploadStreamOptions{
 		Concurrency: 4,
 		AccessTier:  az.tier(), // set tier if specified
 		Metadata:    azMeta,

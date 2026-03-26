@@ -550,6 +550,10 @@ func (j *xlMetaV2Object) SetTransition(fi FileInfo) {
 	j.MetaSys[metaTierObjName] = []byte(fi.TransitionedObjName)
 	j.MetaSys[metaTierVersionID] = []byte(fi.TransitionVersionID)
 	j.MetaSys[metaTierName] = []byte(fi.TransitionTier)
+	if v, ok := fi.Metadata[ReservedMetadataPrefixLower+"tier-compression"]; ok {
+		j.MetaSys[ReservedMetadataPrefixLower+"tier-compression"] = []byte(v)
+		j.MetaSys[ReservedMetadataPrefixLower+"tier-original-size"] = []byte(fi.Metadata[ReservedMetadataPrefixLower+"tier-original-size"])
+	}
 }
 
 func (j *xlMetaV2Object) RemoveRestoreHdrs() {

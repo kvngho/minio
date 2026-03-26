@@ -33,6 +33,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/minio/madmin-go/v3"
+	"github.com/pierrec/lz4/v4"
 	"github.com/minio/minio-go/v7/pkg/tags"
 	"github.com/minio/minio/internal/amztime"
 	sse "github.com/minio/minio/internal/bucket/encryption"
@@ -756,13 +757,40 @@ func getTransitionedObjectReader(ctx context.Context, bucket, object string, rs 
 		return nil, fmt.Errorf("transition storage class not configured: %w", err)
 	}
 
+	isCompressed := oi.UserDefined[ReservedMetadataPrefixLower+"tier-compression"] == "lz4"
+
 	fn, off, length, err := NewGetObjectReader(rs, oi, opts, h)
 	if err != nil {
 		return nil, ErrorRespToObjectError(err, bucket, object)
 	}
 	gopts := WarmBackendGetOpts{}
 
-	// get correct offsets for object
+	if isCompressed {
+		// For compressed objects, read full object from tier and decompress.
+		// Byte-range reads on compressed data are meaningless.
+		timeTierAction := auditTierActions(ctx, oi.TransitionedObject.Tier, length)
+		reader, err := tgtClient.Get(ctx, oi.TransitionedObject.Name, remoteVersionID(oi.TransitionedObject.VersionID), gopts)
+		if err != nil {
+			return nil, err
+		}
+		lzr := lz4.NewReader(reader)
+		closer := func() {
+			timeTierAction(reader.Close())
+		}
+		var decompReader io.Reader = lzr
+		if off > 0 {
+			if _, err := io.CopyN(io.Discard, lzr, off); err != nil {
+				reader.Close()
+				return nil, err
+			}
+		}
+		if length >= 0 {
+			decompReader = io.LimitReader(lzr, length)
+		}
+		return fn(io.NopCloser(decompReader), h, closer)
+	}
+
+	// Not compressed — use server-side range read as before.
 	if off >= 0 && length >= 0 {
 		gopts.startOffset = off
 		gopts.length = length
